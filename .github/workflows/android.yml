@@ -51,7 +51,12 @@ jobs:
         run: |
           chmod +x gradlew
           echo "sdk.dir=$ANDROID_HOME" > local.properties
-          ./gradlew --no-daemon assembleRelease
+          set -o pipefail
+          if ! ./gradlew --no-daemon assembleRelease 2>&1 | tee "$RUNNER_TEMP/gradle.log"; then
+            msg=$(grep -E "error|What went wrong|FAILURE|Exception|> " "$RUNNER_TEMP/gradle.log" | tail -40 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Gradle build failed::$msg"
+            exit 1
+          fi
 
       - name: Collect APK
         id: apk
