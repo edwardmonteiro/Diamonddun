@@ -1,0 +1,78 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build web bundle
+        run: |
+          npm ci
+          npm run build
+          npx cap sync android
+
+      - name: Optional release keystore from secrets
+        env:
+          KS_B64: ${{ secrets.DD_KEYSTORE_BASE64 }}
+        if: ${{ env.KS_B64 != '' }}
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          echo "DD_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          echo "DD_KEYSTORE_PASSWORD=${{ secrets.DD_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "DD_KEY_ALIAS=${{ secrets.DD_KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "DD_KEY_PASSWORD=${{ secrets.DD_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Assemble release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Collect APK
+        id: apk
+        run: |
+          NAME="DiamondDash-v1.0.${{ github.run_number }}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "$NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diamond-dash-apk
+          path: ${{ steps.apk.outputs.name }}
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Diamond Dash v1.0.${{ github.run_number }}
+          make_latest: true
+          files: ${{ steps.apk.outputs.name }}
+          body: |
+            APK pronto para instalar no Android (sideload).
+            Baixe o arquivo `.apk` abaixo, abra no celular e permita "instalar apps desconhecidos" se o Android pedir.

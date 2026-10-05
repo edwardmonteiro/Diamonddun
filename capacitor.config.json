@@ -1,0 +1,12 @@
+{
+  "appId": "com.edwardmonteiro.diamonddash",
+  "appName": "Diamond Dash",
+  "webDir": "dist",
+  "backgroundColor": "#05061a",
+  "android": {
+    "backgroundColor": "#05061a",
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  }
+}
