@@ -1,0 +1,32 @@
+name: IA local (smoke test)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ai/**'
+      - 'src/ds/**'
+      - 'tools/llm-smoke.mjs'
+      - '.github/workflows/llm-smoke.yml'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+          npx playwright install --with-deps chromium
+      - name: Run real model in headless Chromium (single-thread, like the Android WebView)
+        run: |
+          npx vite preview --port 4173 --strictPort &
+          sleep 3
+          node tools/llm-smoke.mjs http://localhost:4173/

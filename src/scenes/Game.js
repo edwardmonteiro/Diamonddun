@@ -1,9 +1,11 @@
 import Phaser from 'phaser';
-import { VW, VH, PHYS, PX_PER_M, COLORS, speedAt, setupCamera } from '../config.js';
+import { VW, VH, PHYS, PX_PER_M, COLORS, setupCamera } from '../config.js';
 import { Parallax } from '../background.js';
 import { LevelGen } from '../level.js';
 import { label, iconButton, pillButton, soundToggle, formatInt, fadeMusic } from '../ui.js';
 import { save } from '../storage.js';
+import { theme, themeHex } from '../ds/tokens.js';
+import { recordPhaseResult } from '../ai/history.js';
 
 const ADD = Phaser.BlendModes.ADD;
 const START_X = 400;
@@ -15,11 +17,27 @@ export default class Game extends Phaser.Scene {
     super('Game');
   }
 
+  init(data) {
+    this.spec = data?.spec || null;
+    this.mode = this.spec ? 'phase' : 'endless';
+    this.attempt = data?.attempt || 1;
+    this.themeId = this.spec?.tema || 'aurora';
+    this.tk = themeHex(this.themeId);
+  }
+
   // ===================================================================== init
   create() {
     this.cam = setupCamera(this);
     this.cam.fadeIn(400, 5, 6, 26);
-    this.bg = new Parallax(this);
+    this.bg = new Parallax(this, this.themeId);
+    // scene instances are reused by Phaser: reset every per-run flag
+    this.completed = false;
+    this.overlay = null;
+    this.pauseMenu = null;
+    this.finishLineX = 0;
+    this.progress = 0;
+    this.deathReason = null;
+    this.crashInfo = null;
 
     this.dead = false;
     this.paused = false;
@@ -60,7 +78,7 @@ export default class Game extends Phaser.Scene {
 
     this.createPlayer();
 
-    this.gen = new LevelGen(this, START_X);
+    this.gen = new LevelGen(this, START_X, this.spec);
     this.gen.start(START_X);
     this.generate();
 
@@ -78,9 +96,11 @@ export default class Game extends Phaser.Scene {
     this.createHud();
     this.createInput();
     if (!save.get('tutorialDone')) this.showTutorial();
+    else if (this.spec && this.attempt === 1) this.showIntro();
 
     this.cam.scrollX = this.player.x - VW * PLAYER_SCREEN_X;
-    fadeMusic(this, 'music', 0.5);
+    const music = fadeMusic(this, 'music', 0.5);
+    music.setRate(theme(this.themeId).music || 1);
 
     this.onHidden = () => this.pause();
     this.game.events.on('hidden', this.onHidden);
@@ -104,7 +124,7 @@ export default class Game extends Phaser.Scene {
       speedY: { min: -12, max: 12 },
       scale: { start: 0.36, end: 0 },
       alpha: { start: 0.55, end: 0 },
-      tint: [0x6eebff, 0x9fdcff, 0xb69bff],
+      tint: this.spec ? [this.tk.accent, 0xffffff] : [0x6eebff, 0x9fdcff, 0xb69bff],
       blendMode: ADD,
       frequency: 14,
       follow: this.gfx,
@@ -147,8 +167,18 @@ export default class Game extends Phaser.Scene {
 
   createHud() {
     const pad = 34;
-    this.hudDist = label(this, pad, pad - 6, '0', 40, '200', COLORS.text).setDepth(100);
-    this.hudUnit = label(this, pad, pad + 42, 'METROS', 11, '500', COLORS.dim, 5).setDepth(100);
+    if (this.spec) {
+      this.hudDist = label(this, pad, pad - 2, this.spec.nome.toUpperCase(), 15, '500', COLORS.text, 5).setDepth(100);
+      this.hudUnit = label(this, pad, pad + 24, `TENTATIVA ${this.attempt}`, 10, '500', COLORS.dim, 5).setDepth(100);
+      const bw = VW * 0.34;
+      this.progTrack = this.add.rectangle(VW / 2 - bw / 2, pad + 16, bw, 3, 0xffffff, 0.16).setOrigin(0, 0.5).setScrollFactor(0).setDepth(100);
+      this.progBar = this.add.rectangle(VW / 2 - bw / 2, pad + 16, 1, 3, this.tk.accent, 1).setOrigin(0, 0.5).setScrollFactor(0).setDepth(101);
+      this.progGem = this.add.image(VW / 2 + bw / 2 + 14, pad + 16, 'sparkle').setScale(0.3).setScrollFactor(0).setDepth(101).setTint(this.tk.accent);
+      this.progW = bw;
+    } else {
+      this.hudDist = label(this, pad, pad - 6, '0', 40, '200', COLORS.text).setDepth(100);
+      this.hudUnit = label(this, pad, pad + 42, 'METROS', 11, '500', COLORS.dim, 5).setDepth(100);
+    }
 
     this.pauseBtn = iconButton(this, VW - pad - 12, pad + 16, 'i_pause', () => this.pause(), 24).setDepth(100);
     this.hudGemIcon = this.add.image(VW - pad - 126, pad + 16, 'gem').setScale(0.5).setScrollFactor(0).setDepth(100);
@@ -241,6 +271,11 @@ export default class Game extends Phaser.Scene {
     const h = VH - p.y + 60;
     const ts = this.add.tileSprite(p.x, p.y, p.w, h, 'ground').setOrigin(0).setDepth(10);
     ts.setTileScale(0.5, 0.5);
+    if (this.spec) {
+      ts.setTint(this.tk.ground);
+      const edge = this.add.rectangle(p.x, p.y + 1, p.w, 2, this.tk.accent, 0.85).setOrigin(0, 0.5).setDepth(11).setBlendMode(ADD);
+      this.track(edge, p.x + p.w);
+    }
     ts.tilePositionX = p.x * 2;
     this.solids.add(ts);
     const b = ts.body;
@@ -253,6 +288,7 @@ export default class Game extends Phaser.Scene {
   plat(x, y, w, crumble) {
     const ts = this.add.tileSprite(x, y, w, 30, crumble ? 'plat_crumble' : 'plat').setOrigin(0).setDepth(10);
     ts.setTileScale(0.5, 0.5);
+    if (this.spec && !crumble) ts.setTint(this.tk.ground);
     if (crumble) {
       this.crumbles.add(ts);
       ts.body.setAllowGravity(false).setImmovable(true);
@@ -327,6 +363,24 @@ export default class Game extends Phaser.Scene {
     this.lasers.push(L);
     [top, bot, beam, core].forEach((o) => this.track(o, x + 30));
     L.dead = () => !beam.active;
+  }
+
+  finish(x, groundY) {
+    const c = this.tk.accent;
+    const h = groundY + 20;
+    const glow = this.add.rectangle(x, groundY, 90, h, c, 0.16).setOrigin(0.5, 1).setDepth(9).setBlendMode(ADD);
+    const beam = this.add.rectangle(x, groundY, 6, h, 0xffffff, 0.9).setOrigin(0.5, 1).setDepth(14).setBlendMode(ADD);
+    const halo = this.add.rectangle(x, groundY, 26, h, c, 0.45).setOrigin(0.5, 1).setDepth(13).setBlendMode(ADD);
+    const crown = this.add.image(x, groundY - 210, 'gem_big').setScale(0.9).setDepth(15).setTint(c);
+    this.tweens.add({ targets: [halo, glow], alpha: 0.08, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.inOut' });
+    this.tweens.add({ targets: crown, y: crown.y - 14, duration: 1100, yoyo: true, repeat: -1, ease: 'Sine.inOut' });
+    const t = label(this, x, groundY - 280, 'CHEGADA', 14, '700', COLORS.text, 10).setOrigin(0.5).setScrollFactor(1).setDepth(16);
+    const fx = this.add.particles(x, groundY, 'sparkle', {
+      x: { min: -30, max: 30 }, y: { min: -h, max: 0 }, lifespan: 900, speedY: { min: -60, max: -20 },
+      scale: { start: 0.3, end: 0 }, tint: [c, 0xffffff], blendMode: ADD, frequency: 60,
+    }).setDepth(15);
+    [glow, beam, halo, crown, t, fx].forEach((o) => this.track(o, x + 2000));
+    this.finishLineX = x;
   }
 
   hint(x, y, text) {
@@ -447,7 +501,7 @@ export default class Game extends Phaser.Scene {
     const b = p.body;
     const t = this.clock;
     const traveled = p.x - START_X;
-    const S = speedAt(traveled);
+    const S = this.gen.speedAt(traveled);
 
     const onGround = b.blocked.down || b.touching.down;
     if (onGround) {
@@ -541,6 +595,13 @@ export default class Game extends Phaser.Scene {
 
     // HUD
     this.distance = Math.max(0, traveled / PX_PER_M);
+    if (this.spec) {
+      const prog = this.gen.progressAt(p.x);
+      this.progress = Math.max(this.progress || 0, prog);
+      this.progBar.width = Math.max(1, this.progW * this.progress);
+      if (this.finishLineX && p.x >= this.finishLineX) this.complete();
+      return;
+    }
     this.hudDist.setText(formatInt(this.distance));
     if (this.distance >= this.nextMilestone) {
       this.toast(`${formatInt(this.nextMilestone)} m`, COLORS.cyan);
@@ -616,7 +677,7 @@ export default class Game extends Phaser.Scene {
     for (const s of this.stals) {
       if (!s.active) continue;
       const st = s.__stal;
-      const S = speedAt(p.x - START_X);
+      const S = this.gen.speedAt(p.x - START_X);
       if (st.state === 'idle' && s.x - p.x < S * 0.8 + 270 && !this.dead) {
         st.state = 'shaking';
         this.sound.play('tick', { volume: 0.6 });
@@ -691,7 +752,7 @@ export default class Game extends Phaser.Scene {
     const t = label(this, VW / 2, VH * 0.3, 'PAUSA', 40, '200', COLORS.text, 18).setOrigin(0.5);
     const resume = pillButton(this, VW / 2, VH * 0.5, 'CONTINUAR', () => this.resume());
     const restart = pillButton(this, VW / 2 - 130, VH * 0.65, 'REINICIAR', () => this.restart(), { primary: false, w: 220 });
-    const home = pillButton(this, VW / 2 + 130, VH * 0.65, 'MENU', () => this.home(), { primary: false, w: 220 });
+    const home = pillButton(this, VW / 2 + 130, VH * 0.65, this.spec ? 'ESTÚDIO' : 'MENU', () => (this.spec ? this.toStudio() : this.home()), { primary: false, w: 220 });
     const snd = soundToggle(this, VW - 48, 48);
     o.add([dim, t, resume, restart, home, snd]);
     this.pauseMenu = o;
@@ -710,6 +771,7 @@ export default class Game extends Phaser.Scene {
   }
 
   gameOver() {
+    if (this.spec) return this.phaseOver(false);
     const dist = Math.floor(this.distance);
     const best = Math.max(dist, this.prevBest);
     const isRecord = dist > this.prevBest && this.prevBest > 0;
@@ -755,12 +817,107 @@ export default class Game extends Phaser.Scene {
     this.hudUnit.setAlpha(0.0);
   }
 
+  showIntro() {
+    const s = this.spec;
+    const c = this.add.container(VW / 2, VH * 0.42).setScrollFactor(0).setDepth(90);
+    const k = label(this, 0, -46, `FASE · ${theme(s.tema).nome.toUpperCase()}`, 12, '500', Phaser.Display.Color.IntegerToColor(this.tk.accent).rgba, 8).setOrigin(0.5);
+    const t = label(this, 0, 0, s.nome, 46, '200', COLORS.text, 2).setOrigin(0.5);
+    const f = label(this, 0, 48, s.frase, 15, '300', COLORS.dim, 1).setOrigin(0.5);
+    c.add([k, t, f]);
+    c.setAlpha(0);
+    this.tweens.add({ targets: c, alpha: 1, duration: 500, delay: 250 });
+    this.tweens.add({ targets: c, alpha: 0, y: c.y - 20, duration: 600, delay: 3000, onComplete: () => c.destroy() });
+  }
+
+  complete() {
+    if (this.completed || this.dead) return;
+    this.completed = true;
+    this.progress = 1;
+    this.progBar.width = this.progW;
+    this.sound.play('record', { volume: 0.6 });
+    this.flash.setFillStyle(this.tk.accent).setAlpha(0.3);
+    this.tweens.add({ targets: this.flash, alpha: 0, duration: 600 });
+    this.spark.explode(20, this.player.x, this.player.y);
+    this.tweens.add({ targets: this.gfx, alpha: 0, scale: 0.9, duration: 700 });
+    this.trail.stop();
+    this.time.delayedCall(900, () => this.phaseOver(true));
+  }
+
+  result(completed) {
+    return {
+      spec: this.spec,
+      completed,
+      attempts: this.attempt,
+      reason: completed ? null : this.deathReason,
+      progress: completed ? 1 : this.progress || 0,
+      gems: this.gemCount,
+      gemsTotal: this.gen.gemsPlaced,
+      seconds: Math.round(this.clock),
+    };
+  }
+
+  phaseOver(completed) {
+    if (this.overlay) return;
+    const r = this.result(completed);
+    this.registry.set('lastResult', r);
+    recordPhaseResult(r);
+    save.set('totalGems', save.get('totalGems') + this.gemCount);
+    save.set('tutorialDone', true);
+    this.physics.world.pause();
+
+    const cx = VW / 2;
+    const accent = Phaser.Display.Color.IntegerToColor(this.tk.accent).rgba;
+    const o = this.add.container(0, 0).setScrollFactor(0).setDepth(300);
+    const dim = this.add.rectangle(0, 0, VW, VH, 0x05061a, 0.76).setOrigin(0).setInteractive();
+    const head = label(this, cx, VH * 0.16, completed ? 'FASE CONCLUÍDA' : `TENTATIVA ${this.attempt}`, 14, '500',
+      completed ? accent : COLORS.dim, 10).setOrigin(0.5);
+    const big = completed
+      ? label(this, cx, VH * 0.31, this.spec.nome, 60, '200', COLORS.text, 2).setOrigin(0.5)
+      : label(this, cx, VH * 0.31, `${Math.round(r.progress * 100)}%`, 92, '200', COLORS.text).setOrigin(0.5);
+    const sub = label(this, cx, VH * 0.42, completed ? `${r.seconds} s · ${r.attempts} tentativa${r.attempts > 1 ? 's' : ''}` : `DO CAMINHO · ${this.spec.nome.toUpperCase()}`,
+      12, '500', COLORS.dim, 6).setOrigin(0.5);
+    const statY = VH * 0.53;
+    const gemI = this.add.image(cx - 34, statY, 'gem').setScale(0.42);
+    const gemT = label(this, cx - 12, statY, `${r.gems} / ${r.gemsTotal}`, 22, '300', COLORS.text).setOrigin(0, 0.5);
+
+    const items = [dim, head, big, sub, gemI, gemT];
+    if (completed) {
+      items.push(pillButton(this, cx, VH * 0.69, 'PRÓXIMA FASE', () => this.toStudio(true), { w: 280 }));
+      items.push(pillButton(this, cx, VH * 0.82, 'REPETIR', () => this.retry(false), { primary: false, w: 200, h: 46 }));
+    } else {
+      items.push(pillButton(this, cx, VH * 0.69, 'TENTAR DE NOVO', () => this.retry(true), { w: 280 }));
+      items.push(pillButton(this, cx, VH * 0.82, 'AJUSTAR COM IA', () => this.toStudio(false), { primary: false, w: 240, h: 46 }));
+    }
+    items.push(iconButton(this, cx - 220, VH * 0.69, 'i_home', () => this.home(), 25));
+    items.push(soundToggle(this, cx + 220, VH * 0.69));
+    o.add(items);
+    o.setAlpha(0);
+    this.tweens.add({ targets: o, alpha: 1, duration: 380 });
+    this.overlay = o;
+    [this.hudDist, this.hudUnit, this.progTrack, this.progBar, this.progGem].forEach((e) => e?.setAlpha(0));
+  }
+
+  retry(nextAttempt) {
+    this.cam.fadeOut(260, 5, 6, 26);
+    this.cam.once('camerafadeoutcomplete', () => this.scene.restart({ spec: this.spec, attempt: nextAttempt ? this.attempt + 1 : 1 }));
+  }
+
+  toStudio(next) {
+    this.tweens.resumeAll();
+    this.physics.world.resume();
+    this.sound.getAll('music').forEach((m) => m.setRate(1));
+    this.cam.fadeOut(300, 5, 6, 26);
+    this.cam.once('camerafadeoutcomplete', () => this.scene.start('Studio', { result: this.registry.get('lastResult') || this.result(false), next }));
+  }
+
   restart() {
+    if (this.spec) return this.retry(true);
     this.cam.fadeOut(260, 5, 6, 26);
     this.cam.once('camerafadeoutcomplete', () => this.scene.restart());
   }
 
   home() {
+    this.sound.getAll('music').forEach((m) => m.setRate(1));
     this.tweens.resumeAll();
     this.physics.world.resume();
     this.cam.fadeOut(300, 5, 6, 26);

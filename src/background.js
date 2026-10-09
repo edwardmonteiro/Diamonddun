@@ -1,12 +1,13 @@
 import Phaser from 'phaser';
 import { VW, VH } from './config.js';
 import crops from './bgcrops.json';
+import { themeHex } from './ds/tokens.js';
 
 const LOWFX = /[?&]lowfx\b/.test(location.search);
 
 /** Five-layer parallax backdrop, fixed to the camera. */
 export class Parallax {
-  constructor(scene) {
+  constructor(scene, themeId = 'aurora') {
     this.scene = scene;
     const mk = (key, depth, alpha = 1) => {
       const top = crops[key.replace('bg_', '')] || 0;
@@ -20,6 +21,7 @@ export class Parallax {
       { s: mk('bg_mist', -60, 0.9), f: 0.55 },
     ];
     if (LOWFX) this.layers.forEach((l) => l.s.setVisible(false));
+    this.setTheme(themeId);
     // chasm shading: pits fade into darkness
     const g = scene.add.graphics().setScrollFactor(0).setDepth(-55);
     g.fillGradientStyle(0x05061a, 0x05061a, 0x05061a, 0x05061a, 0, 0, 0.92, 0.92);
@@ -38,6 +40,14 @@ export class Parallax {
       frequency: 260,
       quantity: 1,
     }).setScrollFactor(0).setDepth(-50);
+  }
+
+  /** Re-tint the painted layers with a Cristal DS theme. */
+  setTheme(themeId) {
+    const t = themeHex(themeId);
+    const keys = ['sky', 'far', 'mid', 'near', 'mist'];
+    this.layers.forEach((l, i) => l.s.setTint(t[keys[i]]));
+    this.motes?.setParticleTint?.(t.accent);
   }
 
   update(scrollX) {

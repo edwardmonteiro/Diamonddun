@@ -7,6 +7,7 @@ import { SIZE, PHYS } from './config.js';
 import Boot from './scenes/Boot.js';
 import Title from './scenes/Title.js';
 import Game from './scenes/Game.js';
+import Studio from './scenes/Studio.js';
 
 async function start() {
   try {
@@ -30,9 +31,10 @@ async function start() {
       default: 'arcade',
       arcade: { gravity: { y: PHYS.gravity }, fps: 60, debug: false },
     },
-    scene: [Boot, Title, Game],
+    scene: [Boot, Title, Game, Studio],
   });
   window.__game = game;
+  if (/[?&]llmtest\b/.test(location.search)) import('./ai/llm-selftest.js').then((m) => m.install());
 }
 
 start();

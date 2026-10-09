@@ -1,7 +1,11 @@
 import { speedAt } from './config.js';
+import { PIECE } from './ds/components.js';
+import { SPEEDS } from './ds/rules.js';
+import { mulberry } from './ai/quick-director.js';
 
-const rnd = (a, b) => a + Math.random() * (b - a);
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+let RNG = Math.random;
+const rnd = (a, b) => a + RNG() * (b - a);
+const pick = (arr) => arr[Math.floor(RNG() * arr.length)];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 const Y_MIN = 470;
@@ -13,8 +17,16 @@ const AIR_T = 0.74; // seconds of a single jump
  * small, readable challenge, with breathing room scaled by difficulty.
  */
 export class LevelGen {
-  constructor(world, startX) {
+  constructor(world, startX, spec = null) {
     this.w = world;
+    this.spec = spec;
+    this.idx = 0;
+    this.finished = false;
+    this.finishX = Infinity;
+    this.gemsPlaced = 0;
+    this.gemProb = spec ? [0, 0.5, 1, 1][spec.diamantes] ?? 1 : 1;
+    // phases are seeded by their content: every retry is the same, learnable level
+    RNG = spec ? mulberry(hashSpec(spec)) : Math.random;
     this.startX = startX;
     this.x = 0;
     this.y = 590;
@@ -25,11 +37,36 @@ export class LevelGen {
   }
 
   get d() {
+    if (this.spec) {
+      const prog = this.idx / Math.max(1, this.spec.pecas.length);
+      return clamp(((this.spec.velocidade - 1) / 4) * 0.7 + prog * 0.3, 0, 1);
+    }
     return clamp((this.x - this.startX) / 60000, 0, 1);
   }
 
   get S() {
-    return speedAt(this.x - this.startX);
+    return this.speedAt(this.x - this.startX);
+  }
+
+  /** Run speed for a given travelled distance (phase speed or endless ramp). */
+  speedAt(traveled) {
+    if (!this.spec) return speedAt(traveled);
+    const base = SPEEDS[this.spec.velocidade] || SPEEDS[3];
+    const total = Math.max(1, this.finishEstimate || 20000);
+    return base * (1 + 0.08 * clamp(traveled / total, 0, 1));
+  }
+
+  /** 0..1 progress through a phase. */
+  progressAt(x) {
+    if (!this.spec) return 0;
+    const end = this.finished ? this.finishX : this.finishEstimate || 1;
+    return clamp((x - this.startX) / Math.max(1, end - this.startX), 0, 1);
+  }
+
+  gem(x, y) {
+    if (this.gemProb < 1 && RNG() > this.gemProb) return;
+    this.gemsPlaced++;
+    this.w.gem(x, y);
   }
 
   // ------------------------------------------------------------- helpers --
@@ -37,7 +74,7 @@ export class LevelGen {
     this.w.ground(this.x, len, this.y, false);
     if (gems) {
       const n = Math.floor(len / 64);
-      for (let i = 1; i < n; i++) if (i % 2 === 0 || n < 5) this.w.gem(this.x + i * 64, this.y - 44);
+      for (let i = 1; i < n; i++) if (i % 2 === 0 || n < 5) this.gem(this.x + i * 64, this.y - 44);
     }
     this.x += len;
   }
@@ -53,7 +90,7 @@ export class LevelGen {
       const t = n === 1 ? 0.5 : i / (n - 1);
       const x = x0 + (x1 - x0) * t;
       const y = y0 + (y1 - y0) * t - 4 * h * t * (1 - t);
-      this.w.gem(x, y);
+      this.gem(x, y);
     }
   }
 
@@ -79,6 +116,10 @@ export class LevelGen {
   }
 
   start(x) {
+    if (this.spec) {
+      // rough length so speed ramp and progress bar work before the finish is laid
+      this.finishEstimate = this.startX + this.spec.pecas.length * (this.S * 0.65 + 760) + 1100;
+    }
     this.x = x - 400;
     this.run(1500, false);
     // first, gentle diamonds to teach the joy of collecting
@@ -86,6 +127,7 @@ export class LevelGen {
   }
 
   next() {
+    if (this.spec) return this.nextPhase();
     const list = this.chunks().filter((c) => c.w > 0 && c.id !== this.last);
     // early game: ease in with a scripted sequence
     const script = ['gap', 'spikes', 'gap', 'wall', 'spikes', 'steps'];
@@ -93,7 +135,7 @@ export class LevelGen {
     if (this.count < script.length) id = script[this.count];
     else {
       const total = list.reduce((s, c) => s + c.w, 0);
-      let r = Math.random() * total;
+      let r = RNG() * total;
       id = list.find((c) => (r -= c.w) < 0)?.id || 'flat';
     }
     if (id === 'wall' && !(this.x - this.lastDashReq > this.S * 2.2)) id = 'spikes';
@@ -103,12 +145,47 @@ export class LevelGen {
     // breathing room shrinks with difficulty
     const rest = Math.round(this.S * rnd(0.55, 0.85) * (1.15 - this.d * 0.55));
     this.drift();
-    this.run(rest, Math.random() < 0.35);
+    this.run(rest, RNG() < 0.35);
+  }
+
+  nextPhase() {
+    const ids = this.spec.pecas;
+    if (this.idx < ids.length) {
+      const id = ids[this.idx];
+      const p = PIECE[id];
+      this.last = id;
+      this[p?.gen || 'flat']();
+      this.idx++;
+      const rest = Math.round(this.S * rnd(0.5, 0.8) * (1.15 - this.d * 0.5));
+      if (this.idx < ids.length) this.drift();
+      this.run(rest, this.gemProb >= 1 && RNG() < (this.spec.diamantes === 3 ? 0.7 : 0.35));
+      return;
+    }
+    if (!this.finished) {
+      this.run(420, this.spec.diamantes > 1);
+      this.finished = true;
+      this.finishX = this.x;
+      this.w.finish(this.x, this.y);
+      this.run(2400);
+      return;
+    }
+    this.run(1200);
+  }
+
+  gemRain() {
+    this.run(160);
+    const len = 640;
+    this.w.ground(this.x, len, this.y, false);
+    for (let k = 0; k < 3; k++) {
+      const x0 = this.x + k * 210;
+      this.arc(x0, this.y - 50, x0 + 180, this.y - 50, 120 + k * 30, 5);
+    }
+    this.x += len;
   }
 
   drift() {
     // gentle terrain undulation between chunks
-    const r = Math.random();
+    const r = RNG();
     if (r < 0.25 && this.y > Y_MIN + 40) {
       // step up: needs a hop, telegraphed by diamonds
       const up = Math.round(rnd(40, 75));
@@ -129,7 +206,7 @@ export class LevelGen {
     const S = this.S;
     this.run(180);
     const g = Math.round(clamp(S * AIR_T * rnd(0.45, 0.62), 140, 420));
-    const dy = Math.random() < 0.5 ? 0 : Math.round(rnd(-50, 70));
+    const dy = RNG() < 0.5 ? 0 : Math.round(rnd(-50, 70));
     const ny = clamp(this.y + dy, Y_MIN, Y_MAX);
     this.arc(this.x - 40, this.y - 50, this.x + g + 40, ny - 50, 150, 5);
     this.x += g;
@@ -164,8 +241,8 @@ export class LevelGen {
     heights.forEach((h) => {
       const w = 180;
       this.w.plat(px, this.y - h, w, false);
-      this.w.gem(px + 50, this.y - h - 44);
-      this.w.gem(px + 130, this.y - h - 44);
+      this.gem(px + 50, this.y - h - 44);
+      this.gem(px + 130, this.y - h - 44);
       px += w + gap;
     });
     this.x = px;
@@ -183,7 +260,7 @@ export class LevelGen {
     // a saw hovering just above head height: stay low and collect underneath
     this.run(160);
     this.w.saw(this.x + 120, this.y - 132, {});
-    for (let i = 0; i < 5; i++) this.w.gem(this.x + i * 60, this.y - 36);
+    for (let i = 0; i < 5; i++) this.gem(this.x + i * 60, this.y - 36);
     this.run(320);
   }
 
@@ -196,7 +273,7 @@ export class LevelGen {
   wall() {
     this.run(300);
     this.w.wall(this.x, this.y);
-    for (let i = -2; i <= 3; i++) this.w.gem(this.x + i * 56, this.y - 44);
+    for (let i = -2; i <= 3; i++) this.gem(this.x + i * 56, this.y - 44);
     if (this.wallsSeen++ < 2) this.w.hint(this.x, this.y - 290, 'DASH');
     this.lastDashReq = this.x;
     this.run(360);
@@ -207,8 +284,8 @@ export class LevelGen {
     this.run(200);
     for (let i = 0; i < n; i++) {
       this.w.stal(this.x + 140, this.y);
-      this.w.gem(this.x + 40, this.y - 44);
-      this.w.gem(this.x + 260, this.y - 44);
+      this.gem(this.x + 40, this.y - 44);
+      this.gem(this.x + 260, this.y - 44);
       this.run(320);
     }
   }
@@ -217,7 +294,7 @@ export class LevelGen {
     this.run(280);
     this.w.laser(this.x, this.y, { period: rnd(1500, 1900), on: 0.45 });
     this.lastDashReq = this.x;
-    for (let i = -1; i <= 2; i++) this.w.gem(this.x + i * 60, this.y - 44);
+    for (let i = -1; i <= 2; i++) this.gem(this.x + i * 60, this.y - 44);
     this.run(320);
   }
 
@@ -245,4 +322,14 @@ export class LevelGen {
     this.run(Math.round(this.S * 0.45));
     this[b]();
   }
+}
+
+function hashSpec(spec) {
+  const str = JSON.stringify([spec.nome, spec.tema, spec.velocidade, spec.diamantes, spec.pecas]);
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
 }
