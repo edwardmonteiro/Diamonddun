@@ -2,6 +2,9 @@ name: Model mirror (dev)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/model-mirror.yml']
 
 permissions:
   contents: write
