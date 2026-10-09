@@ -1,0 +1,26 @@
+name: Model mirror (dev)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download GGUF candidates
+        run: |
+          mkdir m && cd m
+          curl -sSLf -o qwen2.5-0.5b-instruct-q4_k_m.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+          curl -sSLf -o qwen2.5-0.5b-instruct-q4_0.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_0.gguf
+          ls -la
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-models
+          name: dev models (não instalar)
+          prerelease: true
+          make_latest: false
+          files: m/*.gguf
+          body: Mirror interno para testes de desempenho. Não é uma versão do jogo.
