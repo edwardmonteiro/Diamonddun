@@ -89,6 +89,8 @@ export function parseIntent(request) {
       else intent.weights[id] = Math.max(intent.weights[id] ?? 1, 2);
     }
   }
+  // "no abismo" names the theme, not the double-jump piece
+  if (intent.theme === 'abismo' && intent.weights.abismo === 2) delete intent.weights.abismo;
   // "serra" also vetoes its variants when negated
   if (intent.exclude.has('serra')) ['serra_alta', 'serra_movel'].forEach((s) => intent.exclude.add(s));
   if (onlySet.size) {
@@ -102,7 +104,23 @@ export function parseIntent(request) {
 
 /** Hard constraints handed to normalizeSpec(). */
 export function constraintsFrom(intent) {
-  return { exclude: intent.exclude, only: intent.only, theme: intent.theme, speed: intent.speed };
+  const want = {};
+  for (const [id, m] of Object.entries(intent.weights)) {
+    if (m < 2 || intent.exclude.has(id) || (intent.only && !intent.only.has(id))) continue;
+    want[id] = m >= 3 ? 3 : 2;
+  }
+  // "só lasers e paredes": every named piece must actually appear
+  if (intent.only) for (const id of intent.only) if (PIECE[id].dif > 0 && !want[id] && intent.only.size <= 4) want[id] = 2;
+  return {
+    exclude: intent.exclude,
+    only: intent.only,
+    theme: intent.theme,
+    speed: intent.speed,
+    difficulty: intent.difficulty,
+    length: intent.length,
+    gems: intent.gems,
+    want,
+  };
 }
 
 const DEATH_TO_PIECE = {

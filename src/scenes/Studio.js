@@ -9,7 +9,7 @@ import { PIECES, PIECE, glyphSvg } from '../ds/components.js';
 import { specStats } from '../ds/rules.js';
 import { direct } from '../ai/director.js';
 import { describeResult, deathPiece } from '../ai/intent.js';
-import { llm, MODEL, partialPieces, partialField } from '../ai/llm.js';
+import { llm, partialPieces, partialField } from '../ai/llm.js';
 import { addPhase, listPhases } from '../ai/history.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -48,6 +48,10 @@ export default class Studio extends Phaser.Scene {
     this.engine = save.get('engine') || 'ia';
     this.buildDom();
     this.unsub = llm.subscribe((st) => this.renderEngine(st));
+    llm.models().then((m) => {
+      this.modelInfo = m;
+      this.renderEngine(llm.state);
+    });
     llm.probe().then((s) => {
       if (this.engine === 'ia' && s === 'cached') llm.load().catch(() => {});
     });
@@ -56,6 +60,7 @@ export default class Studio extends Phaser.Scene {
   }
 
   teardown() {
+    clearInterval(this.ticker);
     this.abort?.abort();
     this.unsub?.();
     this.root?.remove();
@@ -121,7 +126,12 @@ export default class Studio extends Phaser.Scene {
       if (act === 'history') return this.openHistory();
       if (act === 'download') return llm.load().catch(() => {});
       if (act === 'remove') return llm.remove();
+      if (b.dataset.model) return llm.setModel(b.dataset.model).then(() => llm.models()).then((m) => {
+        this.modelInfo = m;
+        this.renderEngine(llm.state);
+      });
     });
+    this.input.addEventListener('focus', () => llm.warmup());
     this.input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -141,7 +151,7 @@ export default class Studio extends Phaser.Scene {
       if (dp) list.unshift(`Menos ${PIECE[dp].nome.toLowerCase()}`);
       list.unshift('Mais fácil');
     } else if (r?.completed) list.unshift('Próxima fase');
-    return [...new Set(list)].slice(0, 9);
+    return [...new Set(list)].slice(0, 7);
   }
 
   addChip(b) {
@@ -167,18 +177,25 @@ export default class Studio extends Phaser.Scene {
       return;
     }
     const pct = Math.round((st.progress || 0) * 100);
+    const MODEL = st.model || llm.model;
+    const size = (mb) => (mb >= 1000 ? `${(mb / 1024).toFixed(1).replace('.', ',')} GB` : `${mb} MB`);
+    const where = st.backend === 'nativo' ? 'motor nativo' : 'motor web';
+    const list = this.modelInfo?.list || [];
+    const picker = list.length > 1 && ['absent', 'ready', 'error', 'cached'].includes(st.status)
+      ? `<div class="st-chips">${list.map((m) => `<button class="ds-chip${m.id === MODEL.id ? ' on' : ''}" data-model="${m.id}">${m.rotulo} · ${m.nome} · ${size(m.mb)}</button>`).join('')}</div>`
+      : '';
     const map = {
       unknown: `<div>Verificando IA local…</div>`,
-      absent: `<div><strong>IA local · ${MODEL.nome}</strong><br>${MODEL.mb} MB, baixa uma vez e roda offline no aparelho. Sem o modelo, uso o gerador rápido.</div>
+      absent: `<div><strong>IA local · ${MODEL.nome}</strong><br>${size(MODEL.mb)}, baixa uma vez (de preferência no Wi-Fi) e roda offline no aparelho. Sem o modelo, uso o gerador rápido.</div>${picker}
         <div><button class="ds-btn ds-btn--ghost ds-btn--sm" data-act="download">${icon('down')} BAIXAR MODELO</button></div>`,
       cached: `<div><strong>IA local</strong> · modelo no aparelho, carregando…</div><div class="st-bar"><i style="width:30%"></i></div>`,
-      downloading: `<div><strong>Baixando ${MODEL.nome}</strong> · ${pct}% de ${MODEL.mb} MB</div><div class="st-bar"><i style="width:${pct}%"></i></div>`,
+      downloading: `<div><strong>Baixando ${MODEL.nome}</strong> · ${pct}% de ${size(MODEL.mb)}</div><div class="st-bar"><i style="width:${pct}%"></i></div>`,
       loading: `<div><strong>Carregando modelo na memória…</strong></div><div class="st-bar"><i style="width:90%"></i></div>`,
-      ready: `<div><strong>IA local pronta</strong> · ${MODEL.nome} · CPU ${st.threads || 1} thread${(st.threads || 1) > 1 ? 's' : ''} · offline</div>
+      ready: `<div><strong>IA local pronta</strong> · ${MODEL.nome} · ${where} · ${st.threads || 1} núcleo${(st.threads || 1) > 1 ? 's' : ''} · offline</div>${picker}
         <div><button class="ds-btn ds-btn--ghost ds-btn--sm" data-act="remove">APAGAR MODELO</button></div>`,
       thinking: `<div><strong>IA local pensando…</strong> · ${MODEL.nome}</div>`,
       error: `<div><strong>A IA local não carregou.</strong> ${esc((st.error || '').slice(0, 90))}<br>Uso o gerador rápido enquanto isso.</div>
-        <div><button class="ds-btn ds-btn--ghost ds-btn--sm" data-act="download">TENTAR DE NOVO</button></div>`,
+        <div><button class="ds-btn ds-btn--ghost ds-btn--sm" data-act="download">TENTAR DE NOVO</button></div>${picker}`,
     };
     box.innerHTML = map[st.status] || map.unknown;
   }
@@ -197,7 +214,13 @@ export default class Studio extends Phaser.Scene {
     this.abort = new AbortController();
     this.$('[data-act="gen"]').disabled = true;
     this.$('[data-act="cancel"]').hidden = engine !== 'ia';
+    this.genStart = performance.now();
     this.renderLive({ phase: engine === 'ia' ? 'Lendo seu pedido…' : 'Desenhando…', text: '' });
+    clearInterval(this.ticker);
+    this.ticker = setInterval(() => {
+      const el = this.root?.querySelector('[data-t]');
+      if (el) el.textContent = `${Math.floor((performance.now() - this.genStart) / 1000)} s`;
+    }, 250);
     try {
       const t0 = performance.now();
       const res = await direct({
@@ -218,6 +241,7 @@ export default class Studio extends Phaser.Scene {
       if (!this.abort.signal.aborted) console.error(e);
       this.renderBlueprint();
     } finally {
+      clearInterval(this.ticker);
       this.busy = false;
       if (this.root?.isConnected) {
         this.$('[data-act="gen"]').disabled = false;
@@ -239,7 +263,7 @@ export default class Studio extends Phaser.Scene {
     }
     if (!this.liveBox || !box.contains(this.liveBox)) {
       box.innerHTML = `
-        <div class="st-kicker"><i class="st-dot live"></i><span class="ds-label" data-k></span></div>
+        <div class="st-kicker"><i class="st-dot live"></i><span class="ds-label" data-k></span><span class="st-grow"></span><span class="ds-label" data-t></span></div>
         <div class="st-name" data-n></div>
         <div class="st-strip" data-s></div>
         <div class="st-raw" data-r></div>`;

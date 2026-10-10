@@ -1,57 +1,66 @@
 /**
- * Local GenAI director — llama.cpp compiled to WebAssembly (wllama) running a
- * small instruct model entirely on the phone. Output is constrained by the
- * design-system JSON schema (grammar-guided decoding), then passed through the
- * same guardrails as every other spec.
+ * Local GenAI director. One facade, two engines:
+ *   - nativo: llama.cpp compiled for ARM inside the APK (fast, multi-threaded)
+ *   - web:    llama.cpp in WebAssembly (browser/CI fallback)
+ * Output is grammar-constrained to the Cristal DS phase schema, then passes
+ * through the same guardrails as every other spec.
  */
-import { Wllama, LoggerWithoutDebug } from '@wllama/wllama';
-import wasmUrl from '@wllama/wllama/esm/wasm/wllama.wasm?url';
-import { PIECES } from '../ds/components.js';
-import { SPEC_SCHEMA } from '../ds/rules.js';
+import { buildMessages } from './llm-prompt.js';
+import { save } from '../storage.js';
 
 export const MODELS = [
   {
+    id: 'qwen2.5-1.5b',
+    nome: 'Qwen2.5 1.5B',
+    rotulo: 'Melhor',
+    licenca: 'Apache-2.0',
+    url: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf',
+    bytes: 1117320736,
+    mb: 1066,
+    native: true,
+  },
+  {
     id: 'qwen2.5-0.5b',
-    nome: 'Qwen2.5 0.5B Instruct',
+    nome: 'Qwen2.5 0.5B',
+    rotulo: 'Leve',
     licenca: 'Apache-2.0',
     url: 'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf',
-    mb: 491,
-  },
-];
-export const MODEL = MODELS[0];
-
-const SYSTEM = `Você é o designer de fases do jogo Diamond Dash, um runner 2D. O herói corre sozinho para a direita; o jogador só PULA (com pulo duplo no ar) e dá DASH (atravessa parede de cristal e laser).
-Crie UMA fase em JSON a partir do pedido do jogador.
-Peças (use só estes ids em "pecas", na ordem em que aparecem na fase):
-${PIECES.map((p) => `- ${p.id}: ${p.ajuda}`).join('\n')}
-Temas: aurora (azul), rosa, gelo (branco), ouro (dourado), esmeralda (verde), abismo (vermelho escuro).
-velocidade: 1 lenta até 5 muito rápida. diamantes: 1 poucos, 2 normal, 3 muitos.
-Regras: comece fácil e cresça até um clímax no fim; use de 8 a 14 peças (mínimo 5, máximo 20); repita as peças que o jogador pedir; nunca use peças que ele proibir; se ele pedir a próxima fase, use o resultado anterior: venceu fácil = mais desafio, morreu muito = alivie a peça que matou.
-nome: título curto e evocativo em português. frase: dica ou provocação curta.`;
-
-const EXAMPLES = [
-  {
-    user: 'Pedido do jogador: quero uma fase rosa com muitas serras, nada de laser',
-    json: '{"nome":"Noite das Serras","tema":"rosa","velocidade":3,"diamantes":2,"pecas":["buraco","serra","espinhos","serra_alta","respiro","serra","degraus","serra_movel","diamantes","serra","abismo","serra_movel"],"frase":"Leia o giro das lâminas antes de saltar."}',
-  },
-  {
-    user: 'Pedido do jogador: próxima fase\nFase anterior "Ponte de Gelo" (tema gelo, velocidade 2, 9 peças): concluída em 1 tentativa(s), 40/44 diamantes.',
-    json: '{"nome":"Cânion Dourado","tema":"ouro","velocidade":3,"diamantes":2,"pecas":["buraco","espinhos","degraus","parede","respiro","estalactite","buraco","ruina","laser","espinhos","abismo"],"frase":"Você venceu o gelo. Agora o sol aperta."}',
+    bytes: 491400032,
+    mb: 469,
+    native: true,
+    web: true,
   },
 ];
 
-let wllama = null;
-let state = { status: 'unknown', progress: 0, error: null, threads: 0 };
+let backend = null; // resolved lazily
+let state = { status: 'unknown', progress: 0, error: null, threads: 0, backend: null, model: null };
 const listeners = new Set();
-
 function set(patch) {
   state = { ...state, ...patch };
   listeners.forEach((fn) => fn(state));
 }
 
+async function pickBackend() {
+  if (backend) return backend;
+  const { nativeAvailable, nativeBackend } = await import('./backends/native.js');
+  if (await nativeAvailable()) backend = nativeBackend;
+  else backend = (await import('./backends/wasm.js')).wasmBackend;
+  return backend;
+}
+
+function friendly(e) {
+  const msg = String(e?.message || e);
+  if (/fetch|network|tunnel|offline|unknownhost|unable to resolve|timeout|http 5/i.test(msg)) return 'Sem conexão para baixar o modelo.';
+  if (/memory|oom|alloc|contexto/i.test(msg)) return 'Memória insuficiente no aparelho.';
+  return msg.slice(0, 120);
+}
+
 export const llm = {
   get state() {
     return state;
+  },
+  get model() {
+    return state.model || MODELS[0];
   },
   subscribe(fn) {
     listeners.add(fn);
@@ -59,25 +68,32 @@ export const llm = {
     return () => listeners.delete(fn);
   },
 
-  instance() {
-    if (!wllama) {
-      wllama = new Wllama({ default: wasmUrl }, { logger: LoggerWithoutDebug, allowOffline: true, parallelDownloads: 4 });
-    }
-    return wllama;
+  /** Models this device can run, with the current choice. */
+  async models() {
+    const b = await pickBackend();
+    const list = MODELS.filter((m) => (b.id === 'nativo' ? m.native : m.web));
+    const saved = list.find((m) => m.id === save.get('llmModel'));
+    return { list, current: saved || list[0], backend: b.id };
   },
 
-  /** Is the model already on the device? Sets status to 'cached' | 'absent'. */
-  async probe() {
-    if (state.status === 'ready' || state.status === 'loading' || state.status === 'downloading') return state.status;
+  async setModel(id) {
+    if (state.status === 'downloading' || state.status === 'loading' || state.status === 'thinking') return;
+    save.set('llmModel', id);
+    this._warmed = false;
+    set({ status: 'unknown', model: null, progress: 0, error: null });
+    await this.probe(true);
+  },
+
+  /** Sets status to 'ready' | 'cached' | 'absent'. */
+  async probe(force = false) {
+    if (!force && ['ready', 'loading', 'downloading', 'thinking'].includes(state.status)) return state.status;
+    const b = await pickBackend();
+    const { current } = await this.models();
     try {
-      const cm = this.instance().cacheManager;
-      const name = await cm.getNameFromURL(MODEL.url);
-      const size = await cm.getSize(name);
-      const meta = size > 0 ? await cm.getMetadata(name) : null;
-      const ok = size > 0 && (!meta?.originalSize || meta.originalSize === size);
-      set({ status: ok ? 'cached' : 'absent' });
-    } catch (e) {
-      set({ status: 'absent' });
+      const s = await b.probe(current);
+      set({ status: s === 'ready' ? 'ready' : s, backend: b.id, model: current });
+    } catch {
+      set({ status: 'absent', backend: b.id, model: current });
     }
     return state.status;
   },
@@ -87,29 +103,20 @@ export const llm = {
     if (state.status === 'ready') return;
     if (this._loading) return this._loading;
     this._loading = (async () => {
-      const w = this.instance();
-      const cached = (await this.probe()) === 'cached';
+      const b = await pickBackend();
+      const cached = (await this.probe(true)) === 'cached';
+      const model = state.model;
       set({ status: cached ? 'loading' : 'downloading', progress: 0, error: null });
       try {
-        await navigator.storage?.persist?.();
-      } catch {
-        /* best effort */
-      }
-      try {
-        await w.loadModelFromUrl(MODEL.url, {
-          n_ctx: 2048,
-          n_batch: 256,
-          useCache: true,
-          progressCallback: ({ loaded, total }) => {
-            if (total > 0) set({ status: 'downloading', progress: loaded / total });
-            if (total > 0 && loaded >= total) set({ status: 'loading', progress: 1 });
-          },
-        });
-        set({ status: 'ready', progress: 1, threads: w.getNumThreads?.() || 1, multi: w.isMultithread?.() || false });
+        const r = await b.load(
+          model,
+          (p) => set({ status: p >= 1 ? 'loading' : 'downloading', progress: p }),
+          (phase) => set({ status: phase }),
+        );
+        set({ status: 'ready', progress: 1, threads: r.threads || 1 });
+        this.warmup();
       } catch (e) {
-        const msg = String(e?.message || e);
-        const friendly = /fetch|network|tunnel|offline/i.test(msg) ? 'Sem conexão para baixar o modelo.' : /memory|oom|alloc/i.test(msg) ? 'Memória insuficiente no aparelho.' : msg;
-        set({ status: 'error', error: friendly });
+        set({ status: 'error', error: friendly(e) });
         throw e;
       } finally {
         this._loading = null;
@@ -118,18 +125,34 @@ export const llm = {
     return this._loading;
   },
 
+  /**
+   * Pre-fill the KV cache with the fixed prefix (rules + example) while the
+   * player is still typing, so "Gerar" only pays for their own words.
+   */
+  warmup() {
+    if (state.status !== 'ready' || this._warmed || this._warm) return this._warm;
+    const t0 = performance.now();
+    this._warm = backend
+      .warmup(buildMessages('próxima fase', ''))
+      .then(() => {
+        this._warmed = true;
+        this.warmMs = Math.round(performance.now() - t0);
+      })
+      .catch(() => {})
+      .finally(() => {
+        this._warm = null;
+      });
+    return this._warm;
+  },
+
   async remove() {
+    const b = await pickBackend();
     try {
-      await wllama?.exit();
+      await b.remove(this.model);
     } catch {
       /* ignore */
     }
-    try {
-      await this.instance().cacheManager.delete(MODEL.url);
-    } catch {
-      /* ignore */
-    }
-    wllama = null;
+    this._warmed = false;
     set({ status: 'absent', progress: 0 });
   },
 
@@ -139,43 +162,19 @@ export const llm = {
    */
   async generate(request, context, { onText, onPrompt, signal } = {}) {
     if (state.status !== 'ready') await this.load();
-    const w = this.instance();
-    const messages = [{ role: 'system', content: SYSTEM }];
-    for (const ex of EXAMPLES) {
-      messages.push({ role: 'user', content: ex.user });
-      messages.push({ role: 'assistant', content: ex.json });
-    }
-    messages.push({ role: 'user', content: `Pedido do jogador: ${request || 'próxima fase'}${context ? `\n${context}` : ''}` });
-
-    let raw = '';
-    let timings = null;
+    await this._warm?.catch(() => {});
     const t0 = performance.now();
     let firstTokenAt = 0;
     set({ status: 'thinking' });
+    let res;
     try {
-      await w.createChatCompletion({
-        messages,
-        max_tokens: 380,
-        temperature: 0.8,
-        top_p: 0.92,
-        top_k: 40,
-        cache_prompt: true,
-        return_progress: true,
-        abortSignal: signal,
-        response_format: { type: 'json_schema', json_schema: { name: 'fase', schema: SPEC_SCHEMA, strict: true } },
-        stream: true,
-        onData: (chunk) => {
-          if (chunk.prompt_progress && onPrompt) {
-            const p = chunk.prompt_progress;
-            onPrompt(p.total ? (p.processed + p.cache) / p.total : 0);
-          }
-          const d = chunk.choices?.[0]?.delta?.content;
-          if (d) {
-            if (!firstTokenAt) firstTokenAt = performance.now();
-            raw += d;
-            onText?.(raw);
-          }
-          if (chunk.timings) timings = chunk.timings;
+      res = await backend.generate({
+        messages: buildMessages(request, context),
+        signal,
+        onPrompt,
+        onText: (raw) => {
+          if (!firstTokenAt) firstTokenAt = performance.now();
+          onText?.(raw);
         },
       });
     } finally {
@@ -183,13 +182,15 @@ export const llm = {
     }
     const t1 = performance.now();
     return {
-      raw,
-      json: parseLoose(raw),
+      raw: res.raw,
+      json: parseLoose(res.raw),
       timings: {
         totalMs: Math.round(t1 - t0),
         promptMs: Math.round((firstTokenAt || t1) - t0),
-        tokPerSec: timings?.predicted_per_second ? +timings.predicted_per_second.toFixed(1) : null,
+        tokPerSec: res.tokPerSec,
         threads: state.threads,
+        backend: backend.id,
+        model: state.model?.id,
       },
     };
   },

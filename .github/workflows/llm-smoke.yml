@@ -8,6 +8,8 @@ on:
       - 'src/ai/**'
       - 'src/ds/**'
       - 'tools/llm-smoke.mjs'
+      - 'tools/native-test/**'
+      - 'android/app/src/main/cpp/**'
       - '.github/workflows/llm-smoke.yml'
 
 jobs:
@@ -30,3 +32,30 @@ jobs:
           npx vite preview --port 4173 --strictPort &
           sleep 3
           node tools/llm-smoke.mjs http://localhost:4173/
+
+  native:
+    # Same dd_engine.cpp the APK ships, built for x86 and run on the real 1.5B model.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build engine harness
+        run: |
+          sh android/native/fetch-llama.sh
+          cmake -S tools/native-test -B nt -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$PWD/android/native/llama.cpp
+          ninja -C nt dd_test
+      - name: Run Qwen2.5 1.5B with the phase grammar
+        run: |
+          curl -sSLf -o model.gguf https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+          node tools/native-test/dump.mjs prompts "quero uma fase rosa com muitas serras, nada de laser" "fase fácil para criança, verde, muitos diamantes" "algo insano no abismo, só lasers e paredes de cristal" > /dev/null
+          ./nt/dd_test model.gguf prompts/grammar.gbnf prompts/p0.txt prompts/p1.txt prompts/p2.txt 2>/dev/null | tee out.txt
+          grep -c '"pecas"' out.txt | grep -q 3
+          python3 - <<'PY'
+          import re
+          txt = open('out.txt').read()
+          esc = lambda s: s.replace('%', '%25').replace('\n', '%0A')
+          print(f"::notice title=Native engine (x86, 4 threads)::{esc(txt)}")
+          PY

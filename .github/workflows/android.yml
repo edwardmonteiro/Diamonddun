@@ -29,6 +29,9 @@ jobs:
           java-version: 21
           cache: gradle
 
+      - name: Fetch llama.cpp (native local LLM)
+        run: sh android/native/fetch-llama.sh
+
       - name: Build web bundle
         run: |
           npm ci
@@ -51,8 +54,11 @@ jobs:
         run: |
           chmod +x gradlew
           echo "sdk.dir=$ANDROID_HOME" > local.properties
+          CMAKE_VER=$(ls "$ANDROID_HOME/cmake" | sort -V | tail -1)
+          echo "cmake $CMAKE_VER · ndk $ANDROID_NDK_LATEST_HOME"
+          export GRADLE_ARGS="-PddCmake=$CMAKE_VER"
           set -o pipefail
-          if ! ./gradlew --no-daemon --stacktrace assembleRelease 2>&1 | tee "$RUNNER_TEMP/gradle.log"; then
+          if ! ./gradlew --no-daemon --stacktrace $GRADLE_ARGS assembleRelease 2>&1 | tee "$RUNNER_TEMP/gradle.log"; then
             msg=$( (grep -n -i -E -B2 -A12 "what went wrong|error:|caused by" "$RUNNER_TEMP/gradle.log" | head -80) | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=Gradle build failed::$msg"
             exit 1

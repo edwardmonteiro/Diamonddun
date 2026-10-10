@@ -80,8 +80,18 @@ export function normalizeSpec(raw, constraints = {}) {
   if (c.speed && velocidade !== c.speed) {
     fixes.push(`velocidade ${velocidade} → ${c.speed}, como você pediu`);
     velocidade = c.speed;
+  } else if (!c.speed && c.difficulty === 'facil' && velocidade > 2) {
+    fixes.push(`velocidade ${velocidade} → 2 para ficar fácil`);
+    velocidade = 2;
+  } else if (!c.speed && c.difficulty === 'dificil' && velocidade < 4) {
+    fixes.push(`velocidade ${velocidade} → 4 para ficar difícil`);
+    velocidade = 4;
   }
-  const diamantes = clampInt(r.diamantes, 1, 3, 2);
+  let diamantes = clampInt(r.diamantes, 1, 3, 2);
+  if (c.gems && diamantes !== c.gems) {
+    fixes.push(c.gems === 3 ? 'mais diamantes, como você pediu' : 'menos diamantes, como você pediu');
+    diamantes = c.gems;
+  }
 
   // ---- pieces
   const rawList = Array.isArray(r.pecas) ? r.pecas : [];
@@ -111,7 +121,68 @@ export function normalizeSpec(raw, constraints = {}) {
     fixes.push('fase completada até o mínimo de peças');
   }
 
+  // ---- the player's words are a contract: requested pieces must show up
+  const pool = PIECE_IDS.filter((id) => PIECE[id].dif > 0 && allowed(id));
+  const want = c.want || {};
+  let added = 0;
+  for (const [id, min] of Object.entries(want)) {
+    if (!allowed(id)) continue;
+    let have = pecas.filter((x) => x === id).length;
+    const count = (x) => pecas.filter((y) => y === x).length;
+    // spread the requested piece evenly instead of piling it at the end
+    for (let j = 0; j < min && have < min; j++) {
+      const at = Math.floor(((j + 1) * pecas.length) / (min + 1));
+      for (let d = 0; d < pecas.length; d++) {
+        const i = at + (d % 2 ? -(d + 1) / 2 : d / 2);
+        if (i <= 0 || i >= pecas.length || pecas[i] === id) continue;
+        const other = pecas[i];
+        if (!want[other] || count(other) > want[other] + 1) {
+          pecas[i] = id;
+          have++;
+          added++;
+          break;
+        }
+      }
+    }
+    while (have < min && pecas.length < LIMITS.maxPieces) {
+      pecas.splice(Math.floor(pecas.length * 0.6), 0, id);
+      have++;
+      added++;
+    }
+  }
+  if (added) fixes.push(`${added} peça(s) que você pediu garantida(s)`);
+
+  // a phase must be mostly challenge, not a walk
+  const challenge = () => pecas.filter((id) => PIECE[id].dif > 0).length;
+  const target = Math.ceil(pecas.length * 0.5);
+  if (pool.length && challenge() < target) {
+    const cap = c.difficulty === 'facil' ? 1 : c.difficulty === 'dificil' ? 3 : 2;
+    const fit = pool.filter((id) => PIECE[id].dif <= cap);
+    const src = fit.length ? fit : pool;
+    let k = 0;
+    let swapped = 0;
+    for (let i = 0; i < pecas.length && challenge() < target; i++) {
+      if (PIECE[pecas[i]].dif === 0 && (i % 2 === 0 || pecas[i] === 'respiro')) {
+        pecas[i] = src[k++ % src.length];
+        swapped++;
+      }
+    }
+    if (swapped) fixes.push(`${swapped} trecho(s) vazio(s) virou(aram) desafio`);
+  }
+
+  // requested length
+  if (c.length && Math.abs(pecas.length - c.length) > 2) {
+    if (pecas.length > c.length) pecas = pecas.slice(0, c.length);
+    else {
+      const src = pool.length ? pool : ['respiro'];
+      let k = 0;
+      while (pecas.length < c.length) pecas.push(src[k++ % src.length]);
+    }
+    fixes.push(`fase com ${c.length} peças, como você pediu`);
+  }
+
   // ---- fairness passes (each one is a visible guardrail)
+  const calm = pool.find((id) => !PIECE[id].dash && PIECE[id].dif <= 1) || 'respiro';
   const out = [];
   let hardRun = 0;
   const maxHard = velocidade >= 4 ? 2 : 3;
@@ -125,7 +196,7 @@ export function normalizeSpec(raw, constraints = {}) {
     }
     const prev = out[out.length - 1];
     if (prev && PIECE[prev].dash && p.dash) {
-      out.push('respiro');
+      out.push(calm);
       dashSplits++;
       hardRun = 0;
     }
@@ -142,6 +213,10 @@ export function normalizeSpec(raw, constraints = {}) {
   if (restsAdded) fixes.push(`${restsAdded} respiro(s) para dar ritmo`);
   if (dashSplits) fixes.push('dash precisa recarregar: separei peças de dash seguidas');
   pecas = out;
+  if (pecas.length > LIMITS.maxPieces + 2) {
+    pecas = pecas.slice(0, LIMITS.maxPieces + 2);
+    fixes.push('fase encurtada para caber no ritmo');
+  }
 
   let nome = String(r.nome || '').replace(/\s+/g, ' ').trim().slice(0, LIMITS.nameMax);
   if (!nome) nome = `${THEME_LABEL[tema]} ${pecas.length}`;
