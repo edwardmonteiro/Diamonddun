@@ -57,7 +57,7 @@ android {
             if (project.hasProperty('ddCmake')) version project.property('ddCmake')
         }
     }
-    if (System.getenv('ANDROID_NDK_LATEST_HOME')) ndkPath System.getenv('ANDROID_NDK_LATEST_HOME')
+    if (project.hasProperty('ddNdk')) ndkVersion project.property('ddNdk')
     packagingOptions {
         jniLibs {
             // ggml loads the best CPU kernel variant from the native lib dir at runtime

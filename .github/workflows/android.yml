@@ -55,8 +55,11 @@ jobs:
           chmod +x gradlew
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           CMAKE_VER=$(ls "$ANDROID_HOME/cmake" | sort -V | tail -1)
-          echo "cmake $CMAKE_VER · ndk $ANDROID_NDK_LATEST_HOME"
-          export GRADLE_ARGS="-PddCmake=$CMAKE_VER"
+          ls "$ANDROID_HOME/ndk" || true
+          NDK_VER=$(ls "$ANDROID_HOME/ndk" | grep -E '^(28|27)\.' | sort -V | tail -1)
+          [ -z "$NDK_VER" ] && NDK_VER=$(ls "$ANDROID_HOME/ndk" | sort -V | tail -1)
+          echo "cmake $CMAKE_VER · ndk $NDK_VER"
+          export GRADLE_ARGS="-PddCmake=$CMAKE_VER -PddNdk=$NDK_VER"
           set -o pipefail
           if ! ./gradlew --no-daemon --stacktrace $GRADLE_ARGS assembleRelease 2>&1 | tee "$RUNNER_TEMP/gradle.log"; then
             msg=$( (grep -n -i -E -B2 -A12 "what went wrong|error:|caused by" "$RUNNER_TEMP/gradle.log" | head -80) | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
