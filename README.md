@@ -13,6 +13,15 @@ Runner 2D minimalista para Android: corra por uma cordilheira de cristal sob a a
 
 Armadilhas: espinhos de cristal, serras (no chão, suspensas e móveis), estalactites que despencam, lasers temporizados, paredes de cristal, plataformas que desmoronam e abismos. A velocidade e a densidade de armadilhas crescem com a distância. Diamantes em sequência sobem o tom do som (combo).
 
+## Fases com IA
+
+No menu, **✦ Fases com IA** abre o Estúdio de Fases: descreva a fase ("noite rosa, muitas serras, nada de laser") ou toque nos atalhos, e um modelo de linguagem rodando **no próprio celular, offline** desenha a fase.
+
+- **Motor:** llama.cpp compilado para ARM dentro do APK (multi-thread). Modelos Qwen2.5 Instruct (Apache-2.0): **1.5B** (≈1,1 GB, melhor) ou **0.5B** (≈470 MB, leve), baixados uma vez pelo app.
+- **Cristal DS (design system de fases):** tokens de tema (aurora, rosa, gelo, ouro, esmeralda, abismo), catálogo de 13 peças (`src/ds/components.js`) e regras de jogabilidade (`src/ds/rules.js`). A IA só escolhe *quais* peças, em que ordem, tema, velocidade e diamantes — com saída travada por gramática (`src/ds/grammar.js`). O design system cuida de distâncias, ritmo, recarga do dash e garante o que o jogador pediu ou vetou.
+- **Próxima fase:** o resultado da tentativa (concluiu? onde morreu?) volta para a IA, que ajusta a próxima.
+- **Sem modelo?** O *gerador rápido* (determinístico, instantâneo) entende os mesmos pedidos.
+
 ## Tecnologia
 
 - **Engine:** [Phaser 3](https://phaser.io) (open source, MIT) + Vite
